@@ -1,19 +1,27 @@
 from pathlib import Path
+
 import joblib
+import numpy as np
 import pandas as pd
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, log_loss
+from scipy.optimize import minimize_scalar
+
+from sklearn.linear_model import (
+    LogisticRegression,
+    PoissonRegressor,
+)
+from sklearn.metrics import (
+    accuracy_score,
+    log_loss,
+)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from prepare_data import (
-    get_base_feature_columns,
-    get_venue_feature_columns,
-)
+from prepare_data import get_base_feature_columns
 
 
 BASE_DIR = Path(__file__).resolve().parent
+
 DATA_FILE = BASE_DIR / "model_data.csv"
 MODEL_FILE = BASE_DIR / "premier_league_model.joblib"
 
@@ -21,7 +29,7 @@ VALIDATION_SEASON = "Season2024-2025"
 TEST_SEASON = "Season2025-2026"
 
 
-def make_model() -> Pipeline:
+def make_logistic():
     return Pipeline([
         ("scaler", StandardScaler()),
         (
@@ -33,199 +41,273 @@ def make_model() -> Pipeline:
     ])
 
 
-def evaluate(
-    model: Pipeline,
-    dataset: pd.DataFrame,
-    features: list[str],
-    name: str,
-) -> dict[str, float]:
-    clean = dataset.dropna(
-        subset=features + ["Target"]
-    ).copy()
+def make_poisson():
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        (
+            "poisson",
+            PoissonRegressor(
+                alpha=1.0,
+                max_iter=5000,
+            ),
+        ),
+    ])
 
-    probabilities = model.predict_proba(
-        clean[features]
-    )
-    predictions = model.predict(
-        clean[features]
-    )
 
-    accuracy = accuracy_score(
-        clean["Target"],
-        predictions,
-    )
-    loss = log_loss(
-        clean["Target"],
+def temperature_scale(
+    probabilities,
+    temperature,
+):
+    probabilities = np.clip(
         probabilities,
+        1e-12,
+        1.0,
     )
 
-    print()
-    print(name)
-    print("=" * 45)
-    print(f"Rows: {len(clean)}")
-    print(f"Accuracy: {accuracy:.3f}")
-    print(f"Log loss: {loss:.3f}")
+    logits = np.log(probabilities)
 
-    return {
-        "accuracy": accuracy,
-        "log_loss": loss,
-        "rows": len(clean),
-    }
+    logits /= temperature
+
+    logits -= logits.max(
+        axis=1,
+        keepdims=True,
+    )
+
+    exp_logits = np.exp(logits)
+
+    return (
+        exp_logits
+        / exp_logits.sum(
+            axis=1,
+            keepdims=True,
+        )
+    )
 
 
-def train_candidate(
-    train: pd.DataFrame,
-    features: list[str],
-) -> Pipeline:
-    clean = train.dropna(
-        subset=features + ["Target"]
+def multiclass_brier(
+    y_true,
+    probabilities,
+):
+    actual = np.zeros_like(
+        probabilities
+    )
+
+    actual[
+        np.arange(len(y_true)),
+        y_true.astype(int),
+    ] = 1
+
+    return np.mean(
+        np.sum(
+            (probabilities - actual) ** 2,
+            axis=1,
+        )
+    )
+
+
+def main():
+    df = pd.read_csv(DATA_FILE)
+
+    df["Date"] = pd.to_datetime(
+        df["Date"]
+    )
+
+    features = (
+        get_base_feature_columns()
+    )
+
+    required = (
+        features
+        + [
+            "Target",
+            "FTHG",
+            "FTAG",
+        ]
+    )
+
+    df = df.dropna(
+        subset=required
     ).copy()
 
-    model = make_model()
-    model.fit(
-        clean[features],
-        clean["Target"],
-    )
-    return model
-
-
-def main() -> None:
-    df = pd.read_csv(DATA_FILE)
-    df["Date"] = pd.to_datetime(df["Date"])
-
-    print("Available seasons:")
-    print(df["Season"].unique())
-
-    base_features = get_base_feature_columns()
-    venue_features = get_venue_feature_columns()
+    # ========================================
+    # Find calibration temperature on 2024/25
+    # ========================================
 
     validation = df[
-        df["Season"] == VALIDATION_SEASON
+        df["Season"]
+        == VALIDATION_SEASON
     ].copy()
 
-    if validation.empty:
-        raise ValueError(
-            f"No rows found for {VALIDATION_SEASON}"
-        )
+    validation_start = (
+        validation["Date"].min()
+    )
 
-    validation_start = validation["Date"].min()
-    train_before_validation = df[
+    train_validation = df[
         df["Date"] < validation_start
     ].copy()
 
-    # Evaluate both models on the SAME validation matches.
-    validation_common = validation.dropna(
-        subset=venue_features + ["Target"]
-    ).copy()
+    calibration_model = make_logistic()
 
-    candidates = {
-        "rolling_elo": base_features,
-        "rolling_elo_venue": venue_features,
-    }
-
-    validation_results = {}
-
-    for name, features in candidates.items():
-        model = train_candidate(
-            train_before_validation,
-            features,
-        )
-
-        probabilities = model.predict_proba(
-            validation_common[features]
-        )
-        predictions = model.predict(
-            validation_common[features]
-        )
-
-        result = {
-            "accuracy": accuracy_score(
-                validation_common["Target"],
-                predictions,
-            ),
-            "log_loss": log_loss(
-                validation_common["Target"],
-                probabilities,
-            ),
-        }
-
-        validation_results[name] = result
-
-        print()
-        print(f"Validation: {name}")
-        print("=" * 45)
-        print(f"Rows: {len(validation_common)}")
-        print(
-            f"Accuracy: {result['accuracy']:.3f}"
-        )
-        print(
-            f"Log loss: {result['log_loss']:.3f}"
-        )
-
-    selected_name = min(
-        validation_results,
-        key=lambda name: (
-            validation_results[name]["log_loss"]
-        ),
+    calibration_model.fit(
+        train_validation[features],
+        train_validation["Target"],
     )
-    selected_features = candidates[selected_name]
+
+    validation_probs = (
+        calibration_model.predict_proba(
+            validation[features]
+        )
+    )
+
+    y_validation = (
+        validation["Target"]
+        .astype(int)
+        .to_numpy()
+    )
+
+    def objective(temperature):
+        calibrated = temperature_scale(
+            validation_probs,
+            temperature,
+        )
+
+        return log_loss(
+            y_validation,
+            calibrated,
+        )
+
+    result = minimize_scalar(
+        objective,
+        bounds=(0.5, 2.0),
+        method="bounded",
+    )
+
+    temperature = float(result.x)
 
     print()
     print(
-        f"Selected model: {selected_name} "
-        "(lowest validation log loss)"
+        f"Temperature: {temperature:.3f}"
     )
 
-    # Honest test on 2025/26: refit using everything before the test
-    # season, then evaluate once on the test season.
+    print(
+        f"Validation log loss: "
+        f"{result.fun:.4f}"
+    )
+
+    # ========================================
+    # Honest 2025/26 test
+    # ========================================
+
     test = df[
-        df["Season"] == TEST_SEASON
+        df["Season"]
+        == TEST_SEASON
     ].copy()
 
-    if test.empty:
-        raise ValueError(
-            f"No rows found for {TEST_SEASON}"
-        )
-
     test_start = test["Date"].min()
-    train_before_test = df[
+
+    train_test = df[
         df["Date"] < test_start
     ].copy()
 
-    test_model = train_candidate(
-        train_before_test,
-        selected_features,
+    test_model = make_logistic()
+
+    test_model.fit(
+        train_test[features],
+        train_test["Target"],
     )
 
-    evaluate(
-        test_model,
-        test,
-        selected_features,
-        f"Final test {TEST_SEASON}: {selected_name}",
+    raw_probs = test_model.predict_proba(
+        test[features]
     )
 
-    # Final production model: train on all completed historical/current
-    # matches for which the selected features are available.
-    final_training = df.dropna(
-        subset=selected_features + ["Target"]
-    ).copy()
+    calibrated_probs = temperature_scale(
+        raw_probs,
+        temperature,
+    )
 
-    final_model = make_model()
-    final_model.fit(
-        final_training[selected_features],
-        final_training["Target"],
+    y_test = (
+        test["Target"]
+        .astype(int)
+        .to_numpy()
+    )
+
+    predictions = np.argmax(
+        calibrated_probs,
+        axis=1,
+    )
+
+    print()
+    print("Calibrated Logistic Test")
+    print("=" * 40)
+
+    print(
+        f"Accuracy: "
+        f"{accuracy_score(
+            y_test,
+            predictions
+        ):.3f}"
+    )
+
+    print(
+        f"Log loss: "
+        f"{log_loss(
+            y_test,
+            calibrated_probs
+        ):.4f}"
+    )
+
+    print(
+        f"Brier: "
+        f"{multiclass_brier(
+            y_test,
+            calibrated_probs
+        ):.4f}"
+    )
+
+    # ========================================
+    # Production models
+    # ========================================
+
+    logistic_model = make_logistic()
+    home_goal_model = make_poisson()
+    away_goal_model = make_poisson()
+
+    logistic_model.fit(
+        df[features],
+        df["Target"],
+    )
+
+    home_goal_model.fit(
+        df[features],
+        df["FTHG"],
+    )
+
+    away_goal_model.fit(
+        df[features],
+        df["FTAG"],
     )
 
     artifact = {
-        "model": final_model,
-        "features": selected_features,
-        "model_name": selected_name,
-        "validation_results": validation_results,
-        "trained_through": (
-            final_training["Date"]
-            .max()
-            .isoformat()
-        ),
+        "model_name":
+            "calibrated_logistic_elo",
+
+        "logistic_model":
+            logistic_model,
+
+        "home_goal_model":
+            home_goal_model,
+
+        "away_goal_model":
+            away_goal_model,
+
+        "temperature":
+            temperature,
+
+        "features":
+            features,
+
+        "trained_through":
+            df["Date"].max().isoformat(),
     }
 
     joblib.dump(
@@ -234,11 +316,10 @@ def main() -> None:
     )
 
     print()
-    print(f"Saved model: {MODEL_FILE}")
     print(
-        f"Features saved with model: "
-        f"{len(selected_features)}"
+        f"Saved production model:"
     )
+    print(MODEL_FILE)
 
 
 if __name__ == "__main__":

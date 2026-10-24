@@ -1,4 +1,5 @@
 from pathlib import Path
+import numpy as np
 import pandas as pd
 
 
@@ -8,6 +9,8 @@ OUTPUT_FILE = BASE_DIR / "model_data.csv"
 
 OVERALL_WINDOW = 5
 VENUE_WINDOW = 3
+
+REST_DAYS_CAP = 14
 
 RAW_COLUMNS = [
     "Date",
@@ -240,6 +243,11 @@ def build_team_history(matches: pd.DataFrame) -> pd.DataFrame:
             "HST",
             "AST",
             "FTR",
+            "HomeElo",
+            "AwayElo",
+            "HomeRestDays",
+            "AwayRestDays",
+            "RestDaysDiff",
         ]
     ].copy()
 
@@ -252,6 +260,11 @@ def build_team_history(matches: pd.DataFrame) -> pd.DataFrame:
             "AS": "ShotsAgainst",
             "HST": "ShotsOnTargetFor",
             "AST": "ShotsOnTargetAgainst",
+            "HomeElo": "TeamElo",
+            "AwayElo": "OpponentElo",
+            "HomeRestDays": "HomeRestDays",
+            "AwayRestDays": "AwayRestDays",
+            "RestDaysDiff": "RestDaysDiff",
         }
     )
 
@@ -272,6 +285,11 @@ def build_team_history(matches: pd.DataFrame) -> pd.DataFrame:
             "AST",
             "HST",
             "FTR",
+            "HomeElo",
+            "AwayElo",
+            "HomeRestDays",
+            "AwayRestDays",
+            "RestDaysDiff",
         ]
     ].copy()
 
@@ -284,6 +302,11 @@ def build_team_history(matches: pd.DataFrame) -> pd.DataFrame:
             "HS": "ShotsAgainst",
             "AST": "ShotsOnTargetFor",
             "HST": "ShotsOnTargetAgainst",
+            "HomeElo": "OpponentElo",
+            "AwayElo": "TeamElo",
+            "HomeRestDays": "HomeRestDays",
+            "AwayRestDays": "AwayRestDays",
+            "RestDaysDiff": "RestDaysDiff",
         }
     )
 
@@ -295,6 +318,49 @@ def build_team_history(matches: pd.DataFrame) -> pd.DataFrame:
     team_history = pd.concat(
         [home, away],
         ignore_index=True,
+    )
+
+    team_history["EloActual"] = (
+        team_history["Points"]
+        .map({
+            3: 1.0,
+            1: 0.5,
+            0: 0.0,
+        })
+    )
+
+    team_advantage = np.where(
+        team_history["Venue"] == "Home",
+        100.0,
+        0.0,
+    )
+
+    opponent_advantage = np.where(
+        team_history["Venue"] == "Away",
+        100.0,
+        0.0,
+    )
+
+    team_history["ExpectedEloScore"] = (
+            1.0
+            /
+            (
+                    1.0
+                    + 10.0 ** (
+                            (
+                                    team_history["OpponentElo"]
+                                    + opponent_advantage
+                                    - team_history["TeamElo"]
+                                    - team_advantage
+                            )
+                            / 400.0
+                    )
+            )
+    )
+
+    team_history["EloOverperformance"] = (
+            team_history["EloActual"]
+            - team_history["ExpectedEloScore"]
     )
 
     return (
@@ -324,6 +390,8 @@ def add_rolling_features(
         "ShotsOnTargetFor",
         "ShotsOnTargetAgainst",
         "Points",
+        "OpponentElo",
+        "EloOverperformance",
     ]
 
     for stat in stats:
@@ -399,6 +467,8 @@ def get_base_feature_columns(
         f"Home_ShotsOnTargetFor_last{overall_window}",
         f"Home_ShotsOnTargetAgainst_last{overall_window}",
         f"Home_Points_last{overall_window}",
+        f"Home_OpponentElo_last{overall_window}",
+        f"Home_EloOverperformance_last{overall_window}",
 
         f"Away_GoalsFor_last{overall_window}",
         f"Away_GoalsAgainst_last{overall_window}",
@@ -407,6 +477,8 @@ def get_base_feature_columns(
         f"Away_ShotsOnTargetFor_last{overall_window}",
         f"Away_ShotsOnTargetAgainst_last{overall_window}",
         f"Away_Points_last{overall_window}",
+        f"Away_OpponentElo_last{overall_window}",
+        f"Away_EloOverperformance_last{overall_window}",
 
         "GoalsForDiff",
         "GoalsAgainstDiff",
@@ -414,6 +486,11 @@ def get_base_feature_columns(
         "ShotsOnTargetDiff",
         "PointsDiff",
         "EloDiff",
+        "OpponentStrengthDiff",
+        "EloFormDiff",
+        "HomeRestDays",
+        "AwayRestDays",
+        "RestDaysDiff",
     ]
 
 
@@ -460,6 +537,8 @@ def build_model_dataset(
         f"ShotsOnTargetFor_last{overall_window}",
         f"ShotsOnTargetAgainst_last{overall_window}",
         f"Points_last{overall_window}",
+        f"OpponentElo_last{overall_window}",
+        f"EloOverperformance_last{overall_window}",
     ]
 
     venue_cols = [
@@ -624,6 +703,24 @@ def build_model_dataset(
         ]
     )
 
+    model_df["OpponentStrengthDiff"] = (
+            model_df[
+                f"Home_OpponentElo_last{overall_window}"
+            ]
+            - model_df[
+                f"Away_OpponentElo_last{overall_window}"
+            ]
+    )
+
+    model_df["EloFormDiff"] = (
+            model_df[
+                f"Home_EloOverperformance_last{overall_window}"
+            ]
+            - model_df[
+                f"Away_EloOverperformance_last{overall_window}"
+            ]
+    )
+
     # EloDiff was created before the merges, but recalculate it to make
     # the relationship explicit.
     model_df["EloDiff"] = (
@@ -637,9 +734,110 @@ def build_model_dataset(
         .reset_index(drop=True)
     )
 
+def add_rest_days(matches):
+    """
+    Adds pre-match rest days for each team.
+
+    Only previous completed Premier League matches are used,
+    so there is no target leakage.
+
+    Rest is capped at 14 days so summer/international breaks
+    do not create huge values.
+    """
+
+    matches = matches.sort_values("Date").copy()
+
+    last_match = {}
+
+    home_rest = []
+    away_rest = []
+
+    for _, row in matches.iterrows():
+
+        date = pd.Timestamp(row["Date"])
+        home = row["HomeTeam"]
+        away = row["AwayTeam"]
+
+        if home in last_match:
+            rest = (
+                date - last_match[home]
+            ).days
+
+            home_rest.append(
+                min(rest, REST_DAYS_CAP)
+            )
+        else:
+            home_rest.append(np.nan)
+
+        if away in last_match:
+            rest = (
+                date - last_match[away]
+            ).days
+
+            away_rest.append(
+                min(rest, REST_DAYS_CAP)
+            )
+        else:
+            away_rest.append(np.nan)
+
+        last_match[home] = date
+        last_match[away] = date
+
+    matches["HomeRestDays"] = (
+        home_rest
+    )
+
+    matches["AwayRestDays"] = (
+        away_rest
+    )
+
+    matches["RestDaysDiff"] = (
+        matches["HomeRestDays"]
+        - matches["AwayRestDays"]
+    )
+
+    return matches
+
+def test_rest_days():
+    matches = pd.DataFrame({
+        "Date": pd.to_datetime([
+            "2026-01-01",
+            "2026-01-05",
+            "2026-01-08",
+        ]),
+        "HomeTeam": [
+            "Arsenal",
+            "Chelsea",
+            "Arsenal",
+        ],
+        "AwayTeam": [
+            "Chelsea",
+            "Liverpool",
+            "Liverpool",
+        ],
+    })
+
+    result = add_rest_days(
+        matches
+    )
+
+    arsenal_second_match = (
+        result.iloc[2]
+    )
+
+    assert (
+        arsenal_second_match[
+            "HomeRestDays"
+        ]
+        == 7
+    )
+
 
 def main() -> None:
     matches = load_all_seasons()
+    matches = add_rest_days(
+        matches
+    )
     matches = add_elo_ratings(matches)
 
     team_history = build_team_history(matches)
