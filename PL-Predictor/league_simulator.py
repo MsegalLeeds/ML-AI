@@ -6,6 +6,7 @@ import pandas as pd
 from predict_match import (
     PremierLeaguePredictor,
 )
+from prepare_data import REST_DAYS_CAP
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -90,11 +91,21 @@ def load_remaining_fixtures(
         FIXTURE_FILE
     )
 
+    required = {"Date", "Home Team", "Away Team"}
+    if not required.issubset(fixtures.columns):
+        raise ValueError(f"Fixture file must contain: {sorted(required)}")
+    if fixtures[list(required)].isna().any().any():
+        raise ValueError("Fixture dates and teams must not be missing.")
+
     fixtures["Date"] = pd.to_datetime(
         fixtures["Date"],
+        format="mixed",
         dayfirst=True,
         errors="coerce",
     )
+    if fixtures["Date"].isna().any():
+        raise ValueError("Fixture file contains an invalid date.")
+    fixtures["Date"] = fixtures["Date"].dt.normalize()
 
     fixtures = fixtures.rename(
         columns={
@@ -116,6 +127,17 @@ def load_remaining_fixtures(
             predictor.normalise_team
         )
     )
+
+    if fixtures.duplicated(["HomeTeam", "AwayTeam"]).any():
+        raise ValueError("Fixture file contains duplicate home/away pairings.")
+    expected = {(home, away) for home in predictor.teams
+                for away in predictor.teams if home != away}
+    scheduled = set(zip(fixtures["HomeTeam"], fixtures["AwayTeam"]))
+    if scheduled != expected:
+        raise ValueError(
+            "Fixture file must contain the full season schedule: "
+            "each team plays every other team once at home and once away."
+        )
 
     current_matches = (
         predictor.matches[
@@ -148,6 +170,12 @@ def load_remaining_fixtures(
         ~fixtures["played"]
     ].copy()
 
+    if (remaining["Date"] <= predictor.matches["Date"].max().normalize()).any():
+        raise ValueError(
+            "Unplayed fixtures fall on or before the results snapshot. "
+            "Update completed results or correct postponed fixture dates."
+        )
+
     return remaining.sort_values(
         "Date"
     )
@@ -158,6 +186,10 @@ def precompute_predictions(
     fixtures,
 ):
     predictions = []
+    last_played = pd.concat([
+        predictor.matches[["Date", "HomeTeam"]].rename(columns={"HomeTeam": "Team"}),
+        predictor.matches[["Date", "AwayTeam"]].rename(columns={"AwayTeam": "Team"}),
+    ]).groupby("Team")["Date"].max().dt.normalize().to_dict()
 
     print()
     print(
@@ -166,14 +198,21 @@ def precompute_predictions(
         f"remaining fixtures..."
     )
 
-    for _, fixture in fixtures.iterrows():
+    for _, fixture in fixtures.sort_values("Date").iterrows():
+        home, away = fixture["HomeTeam"], fixture["AwayTeam"]
+        match_date = pd.Timestamp(fixture["Date"]).normalize()
 
         prediction = (
             predictor.predict(
-                fixture["HomeTeam"],
-                fixture["AwayTeam"],
+                home,
+                away,
+                match_date=match_date,
+                home_rest_days=min((match_date - last_played[home]).days, REST_DAYS_CAP),
+                away_rest_days=min((match_date - last_played[away]).days, REST_DAYS_CAP),
             )
         )
+        # Form and Elo stay fixed; rest follows the remaining schedule.
+        last_played[home] = last_played[away] = match_date
 
         matrix = (
             prediction[
