@@ -71,6 +71,11 @@ class SimulatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'schedule'):
             self.load([('01/01/2026', 'Alpha', 'Beta')])
 
+    def test_rejects_multiple_fixtures_for_one_team_on_one_date(self):
+        with self.assertRaisesRegex(ValueError, 'same date'):
+            self.load([('08/01/2026', 'Alpha', 'Beta'),
+                       ('08/01/2026', 'Beta', 'Alpha')])
+
     def test_rejects_invalid_dates(self):
         with self.assertRaisesRegex(ValueError, 'date'):
             self.load([('01/01/2026', 'Alpha', 'Beta'),

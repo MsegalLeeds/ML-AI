@@ -130,6 +130,12 @@ def load_remaining_fixtures(
 
     if fixtures.duplicated(["HomeTeam", "AwayTeam"]).any():
         raise ValueError("Fixture file contains duplicate home/away pairings.")
+    appearances = pd.concat([
+        fixtures[["Date", "HomeTeam"]].rename(columns={"HomeTeam": "Team"}),
+        fixtures[["Date", "AwayTeam"]].rename(columns={"AwayTeam": "Team"}),
+    ])
+    if appearances.duplicated(["Date", "Team"]).any():
+        raise ValueError("A team cannot have multiple fixtures on the same date.")
     expected = {(home, away) for home in predictor.teams
                 for away in predictor.teams if home != away}
     scheduled = set(zip(fixtures["HomeTeam"], fixtures["AwayTeam"]))
