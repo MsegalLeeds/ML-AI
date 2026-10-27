@@ -1,0 +1,32 @@
+name: Predictor checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: PL-Predictor/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r PL-Predictor/requirements.txt
+      - name: Check dependency compatibility
+        run: python -m pip check
+      - name: Compile all project scripts
+        run: python -m compileall -q PL-Predictor
+      - name: Run regression and end-to-end tests
+        run: python -m unittest discover -s PL-Predictor -v
