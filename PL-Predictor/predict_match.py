@@ -60,6 +60,11 @@ TEAM_ALIASES = {
 class PremierLeaguePredictor:
 
     def __init__(self):
+        if not MODEL_FILE.exists():
+            raise FileNotFoundError(
+                "No trained model found. Run python prepare_data.py, "
+                "then python train_model.py in PL-Predictor."
+            )
         saved = joblib.load(
             MODEL_FILE
         )
@@ -87,6 +92,7 @@ class PremierLeaguePredictor:
         self.model_name = (
             saved["model_name"]
         )
+        self.trained_through = pd.Timestamp(saved["trained_through"]).normalize()
 
         self.matches = load_all_seasons()
 
@@ -129,8 +135,10 @@ class PremierLeaguePredictor:
         self,
         team,
     ):
-        team = TEAM_ALIASES.get(
-            team,
+        team = team.strip()
+        aliases = {name.casefold(): value for name, value in TEAM_ALIASES.items()}
+        team = aliases.get(
+            team.casefold(),
             team,
         )
 
@@ -198,6 +206,14 @@ class PremierLeaguePredictor:
                 f"{len(latest)} completed "
                 f"current-season matches."
             )
+
+        stats = [
+            "GoalsFor", "GoalsAgainst", "ShotsFor", "ShotsAgainst",
+            "ShotsOnTargetFor", "ShotsOnTargetAgainst", "Points",
+            "OpponentElo", "EloOverperformance",
+        ]
+        if not np.isfinite(latest[stats].to_numpy(dtype=float)).all():
+            raise ValueError(f"{team} has missing or non-finite recent statistics.")
 
         form = {
             "GoalsFor":
@@ -554,6 +570,36 @@ class PremierLeaguePredictor:
                 away_team
             )
         )
+
+        if home_team == away_team:
+            raise ValueError("Home and away teams must be different.")
+
+        try:
+            match_date = pd.Timestamp(match_date)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Enter a valid match date (YYYY-MM-DD).") from exc
+        if pd.isna(match_date) or match_date.tzinfo is not None:
+            raise ValueError("Enter a valid match date without a timezone (YYYY-MM-DD).")
+        match_date = match_date.normalize()
+        cutoff = max(self.matches["Date"].max().normalize(), self.trained_through)
+        if match_date <= cutoff:
+            raise ValueError(
+                f"Match date must be after {cutoff.date()}. "
+                "This model uses the latest results and cannot backtest past fixtures."
+            )
+
+        rest_days = []
+        for rest in (home_rest_days, away_rest_days):
+            if rest is not None:
+                try:
+                    rest = float(rest)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Rest days must be a finite, non-negative number.") from exc
+                if not np.isfinite(rest) or rest < 0:
+                    raise ValueError("Rest days must be a finite, non-negative number.")
+                rest = min(rest, REST_DAYS_CAP)
+            rest_days.append(rest)
+        home_rest_days, away_rest_days = rest_days
 
         X = self._feature_row(
             home_team,

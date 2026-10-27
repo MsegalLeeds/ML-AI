@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import joblib
 import numpy as np
@@ -24,6 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 DATA_FILE = BASE_DIR / "model_data.csv"
 MODEL_FILE = BASE_DIR / "premier_league_model.joblib"
+METRICS_FILE = BASE_DIR / "training_metrics.json"
 
 VALIDATION_SEASON = "Season2024-2025"
 TEST_SEASON = "Season2025-2026"
@@ -137,6 +139,8 @@ def main():
         df["Season"]
         == VALIDATION_SEASON
     ].copy()
+    if validation.empty:
+        raise ValueError(f"No complete feature rows for validation season {VALIDATION_SEASON}.")
 
     validation_start = (
         validation["Date"].min()
@@ -145,6 +149,8 @@ def main():
     train_validation = df[
         df["Date"] < validation_start
     ].copy()
+    if set(train_validation["Target"]) != {0, 1, 2}:
+        raise ValueError("Training before validation must include home wins, draws and away wins.")
 
     calibration_model = make_logistic()
 
@@ -202,6 +208,8 @@ def main():
         df["Season"]
         == TEST_SEASON
     ].copy()
+    if test.empty:
+        raise ValueError(f"No complete feature rows for test season {TEST_SEASON}.")
 
     test_start = test["Date"].min()
 
@@ -314,6 +322,40 @@ def main():
         artifact,
         MODEL_FILE,
     )
+
+    def metrics(probabilities):
+        return {
+            "accuracy": float(accuracy_score(y_test, np.argmax(probabilities, axis=1))),
+            "log_loss": float(log_loss(y_test, probabilities, labels=[0, 1, 2])),
+            "brier": float(multiclass_brier(y_test, probabilities)),
+        }
+
+    # A constant prediction from historical outcome frequencies is a useful
+    # minimum baseline, evaluated on exactly the same held-out fixtures.
+    frequencies = train_test["Target"].value_counts(normalize=True).reindex([0, 1, 2], fill_value=0)
+    report = {
+        "model_name": artifact["model_name"],
+        "trained_through": artifact["trained_through"],
+        "features": features,
+        "production_rows": len(df),
+        "temperature": temperature,
+        "validation": {
+            "season": VALIDATION_SEASON,
+            "training_rows": len(train_validation),
+            "evaluation_rows": len(validation),
+            "calibrated_log_loss": float(result.fun),
+        },
+        "test": {
+            "season": TEST_SEASON,
+            "training_rows": len(train_test),
+            "evaluation_rows": len(test),
+            "raw": metrics(raw_probs),
+            "calibrated": metrics(calibrated_probs),
+            "historical_frequency_baseline": metrics(np.tile(frequencies.to_numpy(), (len(test), 1))),
+        },
+    }
+    METRICS_FILE.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"Saved evaluation report: {METRICS_FILE}")
 
     print()
     print(
