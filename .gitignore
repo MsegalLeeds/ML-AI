@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+PL-Predictor/model_data.csv
+PL-Predictor/*.joblib
+PL-Predictor/league_simulation.csv
+PL-Predictor/training_metrics.json

@@ -4,6 +4,7 @@ import pandas as pd
 
 from prepare_data import (
     add_elo_ratings,
+    add_rest_days,
     add_rolling_features,
     add_venue_features,
     build_team_history,
@@ -79,7 +80,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_rolling_features_exclude_current_match(self):
         matches = self.make_matches()
-        history = build_team_history(matches)
+        history = build_team_history(add_elo_ratings(add_rest_days(matches)))
         history = add_rolling_features(
             history,
             window=5,
@@ -100,7 +101,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_venue_features_exist_after_three_prior_games(self):
         matches = self.make_matches()
-        history = build_team_history(matches)
+        history = build_team_history(add_elo_ratings(add_rest_days(matches)))
         history = add_venue_features(
             history,
             window=3,
