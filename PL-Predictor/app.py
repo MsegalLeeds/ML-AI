@@ -3,39 +3,53 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from predict_match import PremierLeaguePredictor
+from predict_match import MODEL_FILE, PremierLeaguePredictor
+from prepare_data import DATA_DIR
+from league_simulator import FIXTURE_FILE
 
 
 BASE_DIR = Path(__file__).resolve().parent
 SIMULATION_FILE = BASE_DIR / "league_simulation.csv"
 
+st.set_page_config(page_title="Premier League Predictor", layout="wide")
+
+
+def file_version(path):
+    if not path.exists():
+        return (str(path), None, None)
+    stat = path.stat()
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
 
 @st.cache_resource
-def load_predictor():
+def load_predictor(versions):
+    # File versions are cache keys so retraining and CSV updates take effect.
     return PremierLeaguePredictor()
 
 
 @st.cache_data
-def load_simulation():
+def load_simulation(version):
     if not SIMULATION_FILE.exists():
         return None
 
     return pd.read_csv(SIMULATION_FILE)
 
 
-predictor = load_predictor()
-
-
-st.set_page_config(
-    page_title="Premier League Predictor",
-    layout="wide",
-)
+try:
+    predictor = load_predictor(tuple(
+        file_version(path) for path in [MODEL_FILE, *sorted(DATA_DIR.glob("*.csv"))]
+    ))
+except (FileNotFoundError, ValueError) as exc:
+    st.error(str(exc))
+    st.stop()
 
 
 st.title("Premier League Predictor")
 
 st.caption(
-    f"Model: {predictor.model_name}"
+    f"Model: {predictor.model_name} | "
+    f"Trained through: {predictor.trained_through.date()} | "
+    f"Results through: {predictor.matches['Date'].max().date()}"
 )
 
 
@@ -75,14 +89,25 @@ with tab_match:
             index=0,
         )
 
+    first_prediction_date = max(
+        predictor.matches["Date"].max().normalize(), predictor.trained_through
+    ) + pd.Timedelta(days=1)
+    match_date = st.date_input(
+        "Match date",
+        value=max(pd.Timestamp.today().normalize(), first_prediction_date).date(),
+        min_value=first_prediction_date.date(),
+        help="Rest days use this date and the latest completed Premier League results.",
+    )
+
     if st.button(
         "Predict match",
         type="primary",
     ):
-        prediction = predictor.predict(
-            home_team,
-            away_team,
-        )
+        try:
+            prediction = predictor.predict(home_team, away_team, match_date=match_date)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
 
         st.subheader(
             f"{prediction['home_team']} vs "
@@ -134,12 +159,19 @@ with tab_league:
 
     st.header("League Predictor")
 
-    simulation = load_simulation()
+    simulation_version = file_version(SIMULATION_FILE)
+    simulation = load_simulation(simulation_version)
+    inputs = [MODEL_FILE, FIXTURE_FILE, *DATA_DIR.glob("*.csv")]
+    stale = simulation is not None and any(
+        path.exists() and path.stat().st_mtime_ns > simulation_version[1]
+        for path in inputs
+    )
 
-    if simulation is None:
+    if simulation is None or stale:
 
         st.warning(
-            "league_simulation.csv has not been generated yet."
+            "league_simulation.csv is missing or older than its model, results, "
+            "or fixture schedule. Regenerate it to see current league forecasts."
         )
 
         st.code(
@@ -171,7 +203,7 @@ with tab_league:
 
         st.dataframe(
             display,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
