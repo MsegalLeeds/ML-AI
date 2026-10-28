@@ -1,6 +1,6 @@
 # Repository assessment
 
-Reviewed the repository at `9c0545f` on 27 October 2026. The Premier League predictor is the only implemented project.
+> Historical note: this review was performed at commit `9c0545f` on 27 October 2026, when the Premier League predictor was the only implemented project. A Stock Predictor baseline was added afterwards; see the root README and `Stock-Predictor/README.md` for the current repository status.
 
 ## Fixed in this change
 
@@ -25,12 +25,12 @@ Reviewed the repository at `9c0545f` on 27 October 2026. The Premier League pred
 - Verified a match prediction and the league table in a live browser. Streamlit's chart dependencies emit non-blocking deprecation/scale-binding warnings; no browser errors were observed.
 - Added automated tests for stale league output and successful match prediction through Streamlit.
 
-## Next priorities
+## Next priorities from that review
 
 1. **Validate predictive quality across multiple seasons.** Add expanding-window backtests and calibration plots. Report performance by season and compare against market and frequency baselines on identical fixtures. Preserve an untouched future period before choosing additional models or features.
 2. **Track data provenance and validation.** Record source URLs, retrieval dates and checksums. The current loader drops rows with invalid dates/results and does not comprehensively validate scores or duplicate results. Replace silent exclusions with a data-quality report before automating downloads.
 3. **Measure early-season coverage.** Predictions need five complete current-season games; add and backtest an explicit fallback for promoted teams and the start of a season before enabling those forecasts.
 4. **Test richer simulation assumptions.** Compare fixed-strength forecasts with simulated Elo/form updates. Include cup/European fixtures if rest is intended to represent actual workload. Document the cost and accuracy benefit before adding complexity.
-5. **Define the stock and drone projects.** Choose their users, inputs, measurable outputs and evaluation datasets before adding implementations. They currently have no code or specification.
+5. **Continue the stock project and define the drone project.** The stock project now has an LSTM baseline; the next steps are return prediction, market-context features, walk-forward validation and model comparisons. The drone project still needs a defined user, input data, measurable output and evaluation dataset.
 
-This pass addresses reproducibility and correctness. It does not establish a new predictive-accuracy gain or validate the external accuracy of the supplied datasets.
+This review addressed reproducibility and correctness of the Premier League predictor. It did not establish a new predictive-accuracy gain or validate the external accuracy of the supplied datasets.
